@@ -11,6 +11,7 @@
 ## 115 网盘
 
 - [115-force-old-ui](https://raw.githubusercontent.com/ggvisPro/monkey/main/115-force-old-ui.user.js) — 新版界面自动跳回旧版。
+- [115-iina-play](https://raw.githubusercontent.com/ggvisPro/monkey/main/115-iina-play.user.js) — 在视频文件的悬浮菜单中添加 IINA 播放按钮，提取原画直链并跳转播放。
 - [115-share-auto](https://raw.githubusercontent.com/ggvisPro/monkey/main/115-share-auto.user.js) — 自动同意协议、设长期有效、选访问码并复制分享文本。
 - [115-series-organizer](https://raw.githubusercontent.com/ggvisPro/monkey/main/115-series-organizer.user.js) — 剧集归入/展平 Season 文件夹，按条件清理杂项。
 - [115-tmdb-rename](https://raw.githubusercontent.com/ggvisPro/monkey/main/115-tmdb-rename.user.js) — 从 TMDB 拉剧集信息批量重命名文件/文件夹（API key 运行时输入）。
