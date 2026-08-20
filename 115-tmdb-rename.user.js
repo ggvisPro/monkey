@@ -1,12 +1,12 @@
 // ==UserScript==
 // @name         115网盘 TMDB 剧集重命名助手
 // @namespace    https://115.com/
-// @version      6.4
+// @version      6.5
 // @updateURL    https://raw.githubusercontent.com/ggvisPro/monkey/main/115-tmdb-rename.user.js
 // @downloadURL  https://raw.githubusercontent.com/ggvisPro/monkey/main/115-tmdb-rename.user.js
-// @description  从TMDB获取剧集信息，通过115官方API批量重命名网盘文件及文件夹（性能优化版）。TMDB API key 运行时由用户输入并持久化，源码不含任何 key。
+// @description  从 TMDB 获取剧集信息，通过 115 官方 API 批量重命名文件及文件夹；可选用本地配置的 AI 网关解析目录剧名。
 // @author       ggvisPro
-// @modified     2026-07-06 00:18:54 CST
+// @modified     2026-08-20 CST
 // @match        https://115.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=115.com
 // @grant        GM_xmlhttpRequest
@@ -16,6 +16,7 @@
 // @connect      api.themoviedb.org
 // @connect      image.tmdb.org
 // @connect      webapi.115.com
+// @connect      *
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -41,6 +42,38 @@
         key = (prompt('请输入 TMDB API key (v3)\n申请地址: https://www.themoviedb.org/settings/api') || '').trim();
         if (key) setApiKey(key);
         return key;
+    }
+
+    // AI 解析配置保存在 Tampermonkey 脚本私有存储中；Authorization 不写入源码、不写日志。
+    const AI_CONFIG_STORAGE = 'tmdb_ai_parse_config_v1';
+    const DEFAULT_AI_CONFIG = Object.freeze({
+        enabled: false,
+        model: 'performance',
+        url: '',
+        authorization: ''
+    });
+
+    function getAiConfig() {
+        const saved = GM_getValue(AI_CONFIG_STORAGE, {});
+        const parsed = typeof saved === 'string' ? (() => {
+            try { return JSON.parse(saved); } catch { return {}; }
+        })() : saved;
+        return { ...DEFAULT_AI_CONFIG, ...(parsed && typeof parsed === 'object' ? parsed : {}) };
+    }
+
+    function setAiConfig(config) {
+        GM_setValue(AI_CONFIG_STORAGE, {
+            enabled: Boolean(config.enabled),
+            model: (config.model || 'performance').trim(),
+            url: (config.url || '').trim(),
+            authorization: (config.authorization || '').trim()
+        });
+    }
+
+    function buildAuthorizationHeader(value) {
+        const auth = (value || '').trim();
+        if (!auth) return '';
+        return /^\S+\s+.+$/.test(auth) ? auth : `Bearer ${auth}`;
     }
     const SKIP_KEYWORDS = ['影视', '动漫', '电影', '电视剧', '纪录片', '综艺', '根目录', '最近接收', '云下载', '个人文档', 'APP', 'av', '国产剧', '纪录片', '日韩剧', '欧美剧'];
     // 文件名（不区分大小写）包含任一关键字 → 在扫描阶段静默送入回收站，仅作用于文件（fid 项），不影响文件夹
@@ -139,6 +172,27 @@
         .tmdb-btn-primary   { background: linear-gradient(135deg, #DA7756, #C4643F); }
         .tmdb-btn-secondary { background: #8B7367; }
         .tmdb-btn-sm { padding: 6px 12px; font-size: 11px; border-radius: 8px; }
+
+        /* ===== AI 解析设置 ===== */
+        #tmdb-ai-settings {
+            display: none; padding: 12px; margin: -4px 0 14px;
+            background: #FFF5F0; border: 1px solid #F0DDD4; border-radius: 10px;
+        }
+        .tmdb-ai-settings-title {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 10px; color: #6F5143; font-size: 12px; font-weight: 700;
+        }
+        .tmdb-ai-switch { display: flex; align-items: center; gap: 7px; cursor: pointer; font-weight: 600; }
+        .tmdb-setting-row { display: grid; grid-template-columns: 92px 1fr; align-items: center; gap: 8px; margin-top: 8px; }
+        .tmdb-setting-row label { color: #8B7367; font-size: 11px; }
+        .tmdb-setting-input {
+            min-width: 0; width: 100%; box-sizing: border-box; padding: 7px 9px;
+            background: #fff; color: #3D2E25; border: 1px solid #F0DDD4; border-radius: 7px;
+            outline: none; font-size: 11px;
+        }
+        .tmdb-setting-input:focus { border-color: #DA7756; box-shadow: 0 0 0 2px rgba(218,119,86,0.12); }
+        .tmdb-settings-help { margin-top: 9px; color: #9B8174; font-size: 10px; line-height: 1.55; }
+        .tmdb-settings-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 10px; }
 
         /* ===== 搜索结果 ===== */
         #tmdb-search-results { margin-bottom: 14px; display: none; }
@@ -356,6 +410,108 @@
         });
     }
 
+    function extractAiMessageContent(payload) {
+        const data = payload && payload.data && !payload.choices ? payload.data : payload;
+        let content = data?.choices?.[0]?.message?.content ?? data?.output_text ?? '';
+        if (Array.isArray(content)) {
+            content = content.map(part => typeof part === 'string' ? part : (part?.text || '')).join('');
+        }
+        return typeof content === 'string' ? content.trim() : content;
+    }
+
+    function parseAiTitle(payload) {
+        const content = extractAiMessageContent(payload);
+        if (content && typeof content === 'object' && typeof content.title === 'string') {
+            return content.title.trim();
+        }
+        if (!content || typeof content !== 'string') throw new Error('AI 网关未返回文本结果');
+
+        const withoutFence = content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+        let title = '';
+        try {
+            const parsed = JSON.parse(withoutFence);
+            if (parsed && typeof parsed.title === 'string') title = parsed.title;
+        } catch {
+            const jsonMatch = withoutFence.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                try {
+                    const parsed = JSON.parse(jsonMatch[0]);
+                    if (parsed && typeof parsed.title === 'string') title = parsed.title;
+                } catch {}
+            }
+        }
+
+        if (!title) {
+            title = withoutFence
+                .split(/\r?\n/)
+                .map(line => line.trim())
+                .find(Boolean) || '';
+            title = title.replace(/^(?:剧名|title)\s*[:：]\s*/i, '').replace(/^["'“”]|["'“”]$/g, '');
+        }
+
+        title = title.replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+        if (!title || title.length > 200) throw new Error('AI 返回的剧名为空或过长');
+        return title;
+    }
+
+    function parseSeriesNameWithAI(folderName) {
+        const config = getAiConfig();
+        if (!config.enabled) return Promise.resolve(folderName);
+        if (!config.url || !config.model || !config.authorization) {
+            return Promise.reject(new Error('AI 解析已开启，但 URL、模型或 Authorization 未配置完整'));
+        }
+
+        let endpoint;
+        try {
+            endpoint = new URL(config.url);
+            if (!['http:', 'https:'].includes(endpoint.protocol)) throw new Error();
+        } catch {
+            return Promise.reject(new Error('AI 网关 URL 无效'));
+        }
+
+        const payload = {
+            model: config.model,
+            messages: [{
+                role: 'user',
+                content: [
+                    '请从影视剧目录名中提取用于 TMDB 搜索的剧名。',
+                    '去掉年份、季数、集数、分辨率、片源、编码、音轨、字幕、发布组等附加信息，但保留剧名本身。',
+                    '只返回 JSON，不要解释，格式：{"title":"剧名"}。',
+                    `目录名：${JSON.stringify(folderName)}`
+                ].join('\n')
+            }],
+            metadata: { business: { product: '' } }
+        };
+
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: endpoint.href,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': buildAuthorizationHeader(config.authorization)
+                },
+                data: JSON.stringify(payload),
+                responseType: 'json',
+                timeout: 30000,
+                onload(res) {
+                    if (res.status && (res.status < 200 || res.status >= 300)) {
+                        reject(new Error(`AI 网关请求失败：HTTP ${res.status}`));
+                        return;
+                    }
+                    try {
+                        const body = res.response || JSON.parse(res.responseText);
+                        resolve(parseAiTitle(body));
+                    } catch (error) {
+                        reject(new Error(`AI 响应解析失败：${error.message}`));
+                    }
+                },
+                onerror: () => reject(new Error('AI 网关网络请求失败')),
+                ontimeout: () => reject(new Error('AI 网关请求超时'))
+            });
+        });
+    }
+
     // 批量送回收站（仅文件 fid，文件夹请勿传入）
     async function deleteFidsBatch(fids) {
         const formData = new URLSearchParams();
@@ -457,12 +613,26 @@
         state._currentFolder = folder;
         const input = document.getElementById('tmdb-search-input');
         if (!input || !name) return;
-        input.value = name;
         if (shouldSkip(name)) {
+            input.value = name;
             updateStatus('⏭ 目录名命中屏蔽关键词，已跳过自动化');
             return;
         }
-        await searchTMDB(name);
+
+        let query = name;
+        if (getAiConfig().enabled) {
+            updateStatus(`🤖 正在解析目录剧名：${folder?.name || name}`, true);
+            try {
+                query = await parseSeriesNameWithAI(folder?.name || name);
+                updateStatus(`🤖 AI 解析结果：${query}`);
+            } catch (error) {
+                console.warn('[TMDB Rename] AI 剧名解析失败，已回退规则解析：', error.message);
+                updateStatus(`⚠️ ${error.message}，已回退规则解析`);
+            }
+        }
+
+        input.value = query;
+        await searchTMDB(query);
     }
 
     // 1. 搜索 TMDB
@@ -1066,6 +1236,7 @@
                     TMDB 剧集重命名
                 </div>
                 <div style="display:flex;gap:6px">
+                    <button class="tmdb-close-btn" id="tmdb-ai-config-btn" title="AI 剧名解析设置">🤖</button>
                     <button class="tmdb-close-btn" id="tmdb-key-btn" title="设置 TMDB API key">🔑</button>
                     <button class="tmdb-close-btn" id="tmdb-close-btn">✕</button>
                 </div>
@@ -1088,6 +1259,34 @@
                     <input type="text" id="tmdb-search-input" class="tmdb-input" placeholder="输入剧名 或 TMDB 链接">
                     <button id="tmdb-search-btn" class="tmdb-btn tmdb-btn-primary">搜索</button>
                 </div>
+                <div id="tmdb-ai-settings">
+                    <div class="tmdb-ai-settings-title">
+                        <span>AI 解析目录剧名</span>
+                        <label class="tmdb-ai-switch">
+                            <input type="checkbox" class="tmdb-checkbox" id="tmdb-ai-enabled">
+                            启用
+                        </label>
+                    </div>
+                    <div class="tmdb-setting-row">
+                        <label for="tmdb-ai-model">模型</label>
+                        <input id="tmdb-ai-model" class="tmdb-setting-input" type="text" placeholder="performance">
+                    </div>
+                    <div class="tmdb-setting-row">
+                        <label for="tmdb-ai-url">网关 URL</label>
+                        <input id="tmdb-ai-url" class="tmdb-setting-input" type="url" placeholder="https://example.com/v1/chat/completions">
+                    </div>
+                    <div class="tmdb-setting-row">
+                        <label for="tmdb-ai-auth">Authorization</label>
+                        <input id="tmdb-ai-auth" class="tmdb-setting-input" type="password" autocomplete="new-password" placeholder="Bearer token 或只填 token">
+                    </div>
+                    <div class="tmdb-settings-help">
+                        仅自动解析当前剧集目录名；手动输入的搜索词不会发送给 AI。Authorization 只保存在 Tampermonkey 本地，并只发送到上面的网关。
+                    </div>
+                    <div class="tmdb-settings-actions">
+                        <button id="tmdb-ai-clear-auth" class="tmdb-btn tmdb-btn-sm tmdb-btn-secondary">清除凭证</button>
+                        <button id="tmdb-ai-save" class="tmdb-btn tmdb-btn-sm tmdb-btn-primary">保存设置</button>
+                    </div>
+                </div>
                 <div id="tmdb-search-results"></div>
                 <div id="tmdb-status">等待操作…</div>
                 <div class="tmdb-progress-wrap"><div class="tmdb-progress-bar"></div></div>
@@ -1102,6 +1301,57 @@
         document.body.appendChild(panel);
 
         document.getElementById('tmdb-close-btn').onclick = () => panel.classList.add('tmdb-hidden');
+        const aiSettings = document.getElementById('tmdb-ai-settings');
+        const aiConfigBtn = document.getElementById('tmdb-ai-config-btn');
+        const fillAiSettings = () => {
+            const config = getAiConfig();
+            document.getElementById('tmdb-ai-enabled').checked = config.enabled;
+            document.getElementById('tmdb-ai-model').value = config.model;
+            document.getElementById('tmdb-ai-url').value = config.url;
+            const authInput = document.getElementById('tmdb-ai-auth');
+            authInput.value = '';
+            authInput.placeholder = config.authorization ? '已保存；留空保持不变' : 'Bearer token 或只填 token';
+            aiConfigBtn.style.background = config.enabled ? 'rgba(255,255,255,0.34)' : 'rgba(255,255,255,0.18)';
+            aiConfigBtn.title = `AI 剧名解析：${config.enabled ? '已开启' : '已关闭'}`;
+        };
+        fillAiSettings();
+        aiConfigBtn.onclick = () => {
+            fillAiSettings();
+            aiSettings.style.display = aiSettings.style.display === 'block' ? 'none' : 'block';
+        };
+        document.getElementById('tmdb-ai-save').onclick = () => {
+            const previous = getAiConfig();
+            const enabled = document.getElementById('tmdb-ai-enabled').checked;
+            const model = document.getElementById('tmdb-ai-model').value.trim() || 'performance';
+            const url = document.getElementById('tmdb-ai-url').value.trim();
+            const enteredAuth = document.getElementById('tmdb-ai-auth').value.trim();
+            const authorization = enteredAuth || previous.authorization;
+
+            if (enabled && (!url || !authorization)) {
+                updateStatus('❌ 开启 AI 解析前，请填写网关 URL 和 Authorization');
+                return;
+            }
+            if (url) {
+                try {
+                    const endpoint = new URL(url);
+                    if (!['http:', 'https:'].includes(endpoint.protocol)) throw new Error();
+                } catch {
+                    updateStatus('❌ AI 网关 URL 必须是有效的 http/https 地址');
+                    return;
+                }
+            }
+
+            setAiConfig({ enabled, model, url, authorization });
+            fillAiSettings();
+            aiSettings.style.display = 'none';
+            updateStatus(`✅ AI 剧名解析已${enabled ? '开启' : '关闭'}，下次自动识别目录时生效`);
+        };
+        document.getElementById('tmdb-ai-clear-auth').onclick = () => {
+            const config = getAiConfig();
+            setAiConfig({ ...config, enabled: false, authorization: '' });
+            fillAiSettings();
+            updateStatus('✅ AI Authorization 已从本地存储清除，AI 解析已关闭');
+        };
         document.getElementById('tmdb-key-btn').onclick = () => {
             const input = prompt('TMDB API key (v3)\n申请地址: https://www.themoviedb.org/settings/api\n留空则清除当前 key:', tmdbKey());
             if (input === null) return;
