@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>语雀表格智能排版 · 本地演示</title>
+<style>
+  *{box-sizing:border-box}body{margin:0;background:#f0eee6;color:#302e29;font:15px/1.65 -apple-system,BlinkMacSystemFont,sans-serif}main{max-width:1180px;margin:auto;padding:32px 36px 100px}h1{font-size:27px;margin:0 0 8px}h2{font-size:19px;margin:26px 0 10px}.note{background:#fff9e9;border:1px solid #d9cbaa;border-radius:8px;padding:12px 16px}.ne-engine{width:100%;overflow:auto;background:white;border:1px solid #ddd6c8;border-radius:8px;padding:18px}table{border-collapse:collapse;table-layout:fixed;margin-bottom:10px}td{border:1px solid #ddd;padding:9px 12px;vertical-align:top;overflow-wrap:anywhere;font-size:14px}tr:first-child{font-weight:600;background:#f5f3ee}.hint{color:#736e64;font-size:13px}button{font:inherit;padding:7px 14px}
+  .ne-card-toolbar{display:flex;align-items:center;gap:8px;width:max-content;border:1px solid #dedede;padding:7px 10px;margin:0 0 16px;border-radius:7px;background:#fff}.ne-card-toolbar>div{padding:6px 9px}
+</style>
+<main>
+  <h1>语雀表格智能排版</h1>
+  <div class="note">本地演示：以下内容均为虚构数据，编辑器接口为模拟实现。直接点击每张表上方菜单里的“智能排版”，在原表查看效果；排版后可点 ↶ 恢复。这里的操作不会写入语雀。</div>
+  <h2>示例一 · 4 列，短标签与长段落混排</h2>
+  <div class="ne-engine" contenteditable="true">
+    <table class="ne-table" id="demo-four" style="width:900px"><colgroup><col width="225"><col width="225"><col width="225"><col width="225"></colgroup><tbody>
+      <tr><td>类别</td><td>项目</td><td>详细说明</td><td>反馈</td></tr>
+      <tr><td rowspan="3">文档协作</td><td>版本记录</td><td>记录每次方案调整的原因、适用范围和验证结果，方便协作者理解当前版本为什么采用这样的结构。较长的说明需要足够的横向空间，避免表格因大量换行而变得过高。</td><td>待补充</td></tr>
+      <tr><td>数据口径</td><td>明确每个字段的含义、取值范围、缺失值处理和相互约束。例外情况单独说明，并附上可复现的测试样例。</td><td>已确认</td></tr>
+      <tr><td>更新流程</td><td>点击表格菜单中的智能排版。应用后检查正文和合并单元格，最后由文档维护者自行更新。</td><td></td></tr>
+    </tbody></table>
+  </div>
+  <h2>示例二 · 12 列，多级表头与长链接</h2>
+  <div class="ne-engine" contenteditable="true"><table class="ne-table" id="demo-twelve"></table></div>
+  <h2>示例三 · 30 列，保留横向滚动</h2>
+  <div class="ne-engine" contenteditable="true"><table class="ne-table" id="demo-thirty"></table></div>
+  <p class="hint">演示使用与油猴脚本相同的排版代码。真实语雀兼容性需要在实际编辑页验证；模拟接口不能证明云端保存结果。</p>
+</main>
+<script>
+  for (const [id, count] of [['demo-twelve', 12], ['demo-thirty', 30]]) {
+    const table = document.getElementById(id), cols = document.createElement('colgroup'), body = document.createElement('tbody');
+    table.style.width = count * 100 + 'px';
+    for (let i = 0; i < count; i++) { const col = document.createElement('col'); col.width = '100'; cols.append(col); }
+    if (count === 12) { const tr = document.createElement('tr'); for (const title of ['基础信息', '处理过程', '核查结果']) { const td = document.createElement('td'); td.colSpan = 4; td.textContent = title; tr.append(td); } body.append(tr); }
+    for (let r = 0; r < 6; r++) { const tr = document.createElement('tr'); for (let c = 0; c < count; c++) { const td = document.createElement('td'); td.textContent = r === 0 ? `字段 ${c + 1}` : c % 7 === 0 ? `样例 ${r}` : c % 7 === 1 ? '需要核对说明、补充依据，并记录后续处理结果。' : c % 7 === 2 ? 'https://example.com/documentation/a-very-long-reference-link' : c % 7 === 3 ? '' : String(r * 10 + c); tr.append(td); } body.append(tr); }
+    table.append(cols, body);
+  }
+  for (const engine of document.querySelectorAll('.ne-engine')) {
+    engine.classList.add('ne-editor-wrap');
+    const table = engine.querySelector('table');
+    const wrap = document.createElement('ne-table-wrap'); wrap.className = 'ne-table-focus';
+    table.replaceWith(wrap); wrap.append(table);
+    const toolbar = document.createElement('div'); toolbar.className = 'ne-card-toolbar'; toolbar.contentEditable = 'false';
+    toolbar.innerHTML = '<div data-testid="ne-card-toolbar-item-equallyColumn">列等宽</div><div data-testid="ne-card-toolbar-item-columnAdaptation">自适应宽度</div><span>↔</span><span>⛶</span>';
+    engine.prepend(toolbar);
+  }
+  // Explicit simulation of the observed native command contract, for local UI review only.
+  for (const table of document.querySelectorAll('table')) {
+    const cols = [...table.querySelectorAll('col')];
+    const view = { nodeName: 'table', attrs: { id: table.id, colCount: cols.length, rowCount: table.rows.length, colWidths: cols.map(c => Number(c.width)), fitWidth: true } };
+    view._virtualNode = { renderer: { kernel: { queryCommandSupported: () => true }, execCommand(name, id, index, width) {
+      if (id !== table.id) return false;
+      if (name === 'tableColumnAdaptation') view.attrs.fitWidth = !view.attrs.fitWidth;
+      else if (name === 'tableColumnWidth') { view.attrs.colWidths[index] = width; cols[index].width = String(width); table.style.width = view.attrs.colWidths.reduce((a, b) => a + b) + 'px'; }
+      else return false;
+      return true;
+    } } };
+    table._neRef = view;
+  }
+</script>
+<script src="../yuque-smart-table.user.js"></script>
+</html>
