@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         115 直链 IINA 播放
 // @namespace    https://115.com/
-// @version      1.4.0
+// @version      1.5.0
 // @updateURL    https://raw.githubusercontent.com/ggvisPro/monkey/main/115-iina-play.user.js
 // @downloadURL  https://raw.githubusercontent.com/ggvisPro/monkey/main/115-iina-play.user.js
-// @description  在 115 网盘文件行的悬浮菜单注入「IINA」和「列表」按钮，支持单集播放或按名称连播当前及后续视频
+// @description  在 115 网盘文件行的悬浮菜单注入「IINA」和「列表」按钮，支持显示文件名的单集播放或连播列表
 // @match        *://115.com/*
 // @connect      115.com
 // @grant        GM_xmlhttpRequest
@@ -46,13 +46,34 @@
       });
   }
 
+  // 将 M3U 内容编码成 mpv 内置的 hex:// 内存流。
+  // #EXTINF 中的标题会被 IINA 用作播放列表显示名称，而下一行仍是真实直链。
+  function makePlaylistUrl(entries) {
+    var lines = ['#EXTM3U'];
+    for (var i = 0; i < entries.length; i++) {
+      var title = String(entries[i].name || '未命名')
+        .replace(/[\r\n\u2028\u2029]+/g, ' ')
+        .trim() || '未命名';
+      // 剧集标题从 S01E16 这样的集数编号开始显示，去掉前面的剧名和年份。
+      var episode = /S\d+E\d+/i.exec(title);
+      if (episode) title = title.slice(episode.index);
+      lines.push('#EXTINF:-1,' + title);
+      lines.push(entries[i].url);
+    }
+
+    var bytes = new TextEncoder().encode(lines.join('\n') + '\n');
+    var hex = new Array(bytes.length);
+    for (var j = 0; j < bytes.length; j++) {
+      hex[j] = bytes[j].toString(16).padStart(2, '0');
+    }
+    return 'hex://' + hex.join('');
+  }
+
   // 通过 iina:// 协议跳转 IINA（IINA 会使用你设置好的 user-agent 请求）
-  function openInIINA(url, enqueue) {
+  function openInIINA(entries) {
     var f = document.createElement('iframe');
     f.style.display = 'none';
-    f.src = enqueue
-      ? 'iina://open?url=' + encodeURIComponent(url) + '&new_window=0&enqueue=1'
-      : 'iina://weblink?url=' + encodeURIComponent(url);
+    f.src = 'iina://open?url=' + encodeURIComponent(makePlaylistUrl(entries)) + '&new_window=0';
     document.body.appendChild(f);
     setTimeout(function () { f.remove(); }, 4000);
   }
@@ -65,7 +86,7 @@
     if (busy[pc]) return;
     busy[pc] = true;
     getDirectUrl(pc).then(function (url) {
-      openInIINA(url);
+      openInIINA([{ name: name, url: url }]);
     }).catch(function (e) {
       alert('《' + name + '》直链提取失败：' + e.message);
     }).then(function () {
@@ -173,13 +194,10 @@
       var failed = results.filter(function (result) { return result && result.error; });
       if (!playable.length) throw new Error('所有直链都提取失败');
 
-      // 先打开当前集，给 IINA 留出建立播放窗口的时间，再顺序入队后续集。
-      openInIINA(playable[0].url, false);
-      for (var i = 1; i < playable.length; i++) {
-        (function (url, delay) {
-          setTimeout(function () { openInIINA(url, true); }, delay);
-        })(playable[i].url, 700 + i * 250);
-      }
+      // 一次性交给 IINA，避免多次协议跳转丢失每一集的标题。
+      openInIINA(playable.map(function (result) {
+        return { name: itemName(result.item), url: result.url };
+      }));
 
       if (failed.length) {
         var failedNames = failed.map(function (result) { return itemName(result.item); });
